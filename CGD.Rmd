@@ -1,0 +1,103 @@
+---
+fontsize: 12pt
+geometry: margin=0.50in
+subparagraph: yes
+title: CGD samples
+date: September 2019
+author: John K. Everett
+indent: false
+header-includes:
+   - \usepackage{pdflscape}
+   - \newcommand{\blandscape}{\begin{landscape}}
+   - \newcommand{\elandscape}{\end{landscape}}
+   - \usepackage{pdfpages}
+output:
+  pdf_document:
+    toc: false
+    keep_tex: no
+    latex_engine: xelatex
+---
+```{r echo = FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+library(kableExtra)
+library(png)
+library(grid)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+library(gridExtra)
+load('report.RData')
+ppNum <- function (n) format(n, big.mark = ",", scientific = FALSE, trim = TRUE)
+```
+
+**Project interface**  
+
+Individual patient reports and a detailed account of received sample can be found via this 
+([Link](http://bushmanlab.org/data/export/projects/gtVISA/CGD)).
+
+\vspace{1.0cm}
+
+**Observed integrations**  
+Bar graph format  
+
+\vspace{1.0cm}
+
+
+```{r, echo = FALSE, message = FALSE, fig.width=8, fig.height=6.5}
+obsIntSites2
+```
+
+\newpage
+
+**Observerd integrations**  
+log10 scale line plot format.  
+
+\vspace{0.5cm}
+
+
+```{r, echo = FALSE, message = FALSE, fig.width=7, fig.height=9}
+obsIntSites 
+```
+
+\newpage
+
+**Integrations near previously reported bad actors**  
+
+\vspace{1.0cm}
+
+
+```{r, echo = FALSE, message = FALSE, fig.width=8, fig.height=9, warning=FALSE}
+badActorPlot 
+```
+
+\newpage
+
+**Neutrophils heat maps**  
+
+\vspace{1.0cm}
+
+```{r, echo = FALSE, fig.height = 10}
+grid.arrange(gA, gB, gC, gD, legend, ncol=1) 
+```
+
+\newpage
+
+**Neutrophils heat maps**  (cont.)  
+
+\vspace{1.0cm}
+
+```{r, echo = FALSE, fig.height = 8}
+grid.arrange(gE, gF, gG, legend, ncol=1)
+```
+
+\newpage
+
+**Sample and data collection summary**  
+
+\vspace{0.5cm}
+
+```{r, echo = FALSE}
+kable(summaryTable, "latex", longtable = T, booktabs = T, linesep = '', align = 'lllclllllll') %>% kable_styling(font_size = 7, latex_options = c("repeat_header"))
+```
+
+
