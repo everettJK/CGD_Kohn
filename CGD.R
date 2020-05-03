@@ -17,16 +17,6 @@ library(xlsx)
 options(useFancyQuotes = FALSE, stringsAsFactors = FALSE)
 #/home/opt/R-3.4.0/bin/Rscript
 
-calculateUC50 <- function(abund){
-  stopifnot(is.vector(abund) & is.numeric(abund))
-  abund <- abund[order(abund)]
-  accum <- sapply(1:length(abund), function(i){sum(abund[1:i])})
-  length(accum[accum >= sum(abund)/2])
-}
-
-ppNum <- function(n){ if(is.na(n)) return(''); format(n,big.mark=",", scientific=FALSE, trim=TRUE) }
-
-
 
 # Retrieve sample data and intSites.
 patients <- c("pB101", "pN102", "pU103", "pN104", "pN105", "pLW", "pAK", "pPM")
@@ -40,11 +30,8 @@ intSites <- getDBgenomicFragments(samples$SpecimenAccNum, 'specimen_management',
             annotateIntSites() %>%
             data.frame()
 
-save(list = ls(all.names = TRUE), file = 'data/data.RData', 
-     envir = .GlobalEnv, compress = TRUE, compression_level = 9)
-
-#--------------------------------------------------------------------------------------------------
-
+intSites.reps <- getDBgenomicFragments(samples$SpecimenAccNum, 'specimen_management', 'intsites_miseq') %>%
+                 stdIntSiteFragments()
 
 # Metadata updates.
 intSites$cellType  <- gsub('^CD34$', 'BM CD34+', intSites$cellType, ignore.case = TRUE)
@@ -78,178 +65,31 @@ intSites$labeledNearestFeature <-
 
 
 # Select last nearest gene in comma delimit list if delimited.
-intSites$labeledNearestFeature <- unlist(lapply(strsplit(intSites$labeledNearestFeature, ','), function(x){ x[[length(x)]] }))
+# intSites$labeledNearestFeature <- unlist(lapply(strsplit(intSites$labeledNearestFeature, ','), function(x){ x[[length(x)]] }))
 
 
+intSites$timePoint <- sub('M12', 'Y1',   intSites$timePoint)
+intSites$timePoint <- sub('M18', 'Y1.5', intSites$timePoint)
+intSites$timePoint <- sub('M24', 'Y2',   intSites$timePoint)
+intSites$timePoint <- sub('M32', 'Y2.5', intSites$timePoint)
 
-# Manuscript stats.
-o <- subset(intSites, timePoint == 'Y1' & cellType == 'PBMC')
-round(sum(sapply(split(o, o$patient), function(x){ n_distinct(x$posid) }, simplify = TRUE, USE.NAMES = TRUE))/4)
-max(subset(o, nearestFeature == 'MECOM')$relAbund)
-max(o$relAbund)
-min(sapply(split(o, o$patient), function(x){ round(vegan::estimateR(x$estAbund, index='chao')[2], 0) }, simplify = TRUE, USE.NAMES = TRUE))
-
-# Average number of sites at Y1
-o <- subset(intSites, patient %in% c('Patient 2', 'Patient 4', 'Patient 6', 'Patient 7') & timePoint == 'Y1' & cellType == 'PBMC') %>%
-  group_by(patient) %>%
-  summarise(sites = n_distinct(posid),
-            chaoCells = round(estimateR(estAbund, index='chao')[2], 0)) %>%
-  ungroup()
-
-mean(o$sites)
-mean(o$chaoCells)
-
-
-
-# Gene enrichment between d0 and final patient time points.
-#--------------------------------------------------------------------------------------------------
-
-CPUs <- 30
-
-intSites.stdChrom <- subset(intSites, seqnames %in% paste0('chr', c(1:23, 'X', 'Y')))
-intSites.stdChrom <- mutate(intSites.stdChrom, nearestFeature = strsplit(intSites.stdChrom$nearestFeature, ','))
-intSites.stdChrom <- unnest(intSites.stdChrom, nearestFeature)
-
-genes <- tibble(gene = unique(intSites.stdChrom$nearestFeature))
-genes$n <- ntile(1:nrow(genes), CPUs)
-
-cluster <- makeCluster(CPUs)
-
-nearestFeatureBoundaries <- 
-  bind_rows(parLapply(cluster, split(genes, genes$n), function(x){
-    library(dplyr)
-    library(GenomicRanges)
-    bind_rows(lapply(x$gene, function(x2){
-                o <- subset(gt23::hg38.refSeqGenesGRanges, toupper(name2) == toupper(x2))
-                o <- o[! grepl('_', seqnames(o))]
-                tibble(gene = x2, chr = as.character(seqnames(o))[1], start = min(start(o)), end = max(end(o)))
-           }))
-   }))
-
-stopCluster(cluster)
-
-
-patient_early_late_sites <- lapply(c('Patient 2',  'Patient 4', 'Patient 6',  'Patient 7'), function(x){
-  o <- subset(intSites.stdChrom, patient == x)
-  a <- subset(o, timePoint == 'D0')
-  b <- subset(o, timePointDays == max(o$timePointDays) & cellType == 'PBMC')
-  list(a, b)
-})
-names(patient_early_late_sites) <- c('Patient 2',  'Patient 4', 'Patient 6',  'Patient 7')
-       
-
-geneEnrichments.d0_vs_LastTimePoint  <-
-  bind_rows(lapply(patient_early_late_sites, function(x){
-    
-    patientNearestFeatureBoundaries   <- subset(nearestFeatureBoundaries, gene %in% c(x[[1]]$nearestFeature, x[[2]]$nearestFeature))
-    patientNearestFeatureBoundaries$n <- ntile(1:nrow(patientNearestFeatureBoundaries), CPUs)
-  
-    cluster <- makeCluster(CPUs)
-    clusterExport(cluster, varlist = c('intSites.stdChrom', 'patientNearestFeatureBoundaries'), envir = environment())
-
-    r <- bind_rows(parLapply(cluster, split(patientNearestFeatureBoundaries, patientNearestFeatureBoundaries$n), function(x2){
-       library(dplyr)
-      
-       bind_rows(lapply(x2$gene, function(x3){
-         g <- subset(patientNearestFeatureBoundaries, gene == x3)
-         
-         # Find patient sites within this gene.
-         i1 <- subset(intSites.stdChrom, patient = x[[1]]$patient[1], seqnames == g$chr & start >= g$start & start <= g$end)
-         i1.maxLateAbund <- max(subset(x[[2]], posid %in% i1$posid)$estAbund)
-         
-         m1 <- matrix(c(n_distinct(subset(x[[1]], posid %in% i1$posid)$posid),   n_distinct(subset(x[[2]], posid %in% i1$posid)$posid), 
-                        n_distinct(subset(x[[1]], ! posid %in% i1$posid)$posid), n_distinct(subset(x[[2]], ! posid %in% i1$posid)$posid)),
-                     nrow = 2, byrow = TRUE, dimnames = list(c('In', 'Out'), c('Early', 'Late')))
-         
-         # Expand gene boundaries by 50K.
-         i2 <- subset(intSites.stdChrom, patient = x[[1]]$patient[1], seqnames == g$chr & start >= (g$start - 50000) & start <= (g$end + 50000))
-         i2.maxLateAbund <- max(subset(x[[2]], posid %in% i2$posid)$estAbund)
-         
-         m2 <- matrix(c(n_distinct(subset(x[[1]], posid %in% i2$posid)$posid), n_distinct(subset(x[[2]], posid %in% i2$posid)$posid), 
-                        n_distinct(subset(x[[1]], ! posid %in% i2$posid)$posid), n_distinct(subset(x[[2]], ! posid %in% i2$posid)$posid)),
-                      nrow = 2, byrow = TRUE, dimnames = list(c('In', 'Out'), c('Early', 'Late')))
-         
-         matrix2string <- function(m) paste0('Early: ', m[1,1], ' in / ', m[2,1], ' out | Late: ', m[1,2], ' in / ', m[2,2], ' out')
-         pChange <- function(m) ((m[1,2] / sum(m[,2])) - (m[1,1] / sum(m[,1])))*100 
-         
-         tibble(pateint = x[[1]]$patient[1], gene = x3, mat1 = matrix2string(m1), p1 = fisher.test(m1)$p.val, 
-                p1.change = sprintf("%.2f%%", pChange(m1)), mat2 = matrix2string(m2), p2 = fisher.test(m2)$p.val,  
-                p2.change = sprintf("%.2f%%", pChange(m2)), maxLateAbund1 = i1.maxLateAbund, maxLateAbund2 = i2.maxLateAbund)
-       }))
-    }))
-    
-    stopCluster(cluster)
-    gc()
-    r
-  }))
-
-geneEnrichments.d0_vs_LastTimePoint$p1.adj <- p.adjust(geneEnrichments.d0_vs_LastTimePoint$p1)
-geneEnrichments.d0_vs_LastTimePoint$p2.adj <- p.adjust(geneEnrichments.d0_vs_LastTimePoint$p2)
-geneEnrichments.d0_vs_LastTimePoint$oncogene <- toupper(geneEnrichments.d0_vs_LastTimePoint$gene) %in% toupper(gt23::hg38.oncoGeneList)
-geneEnrichments.d0_vs_LastTimePoint$lymphomaGene <- toupper(geneEnrichments.d0_vs_LastTimePoint$gene) %in% toupper(gt23::hg38.lymphomaGenesList)
-
-geneEnrichments.d0_vs_LastTimePoint.p1 <- subset(geneEnrichments.d0_vs_LastTimePoint, p1.adj <= 0.05)
-geneEnrichments.d0_vs_LastTimePoint.p2 <- subset(geneEnrichments.d0_vs_LastTimePoint, p2.adj <= 0.05)
-
-wb <- createWorkbook()
-sheet1 <- createSheet(wb, sheetName = 'in TU')
-sheet2 <- createSheet(wb, sheetName = 'in TU +- 50KB')
-
-o1 <- dplyr::select(geneEnrichments.d0_vs_LastTimePoint.p1, pateint, gene, p1.adj, oncogene, lymphomaGene, p1.change, maxLateAbund1, mat1) %>%
-      dplyr::arrange(pateint, p1.adj) %>%
-      dplyr::mutate(p1.adj = formatC(p1.adj, format = "e", digits = 2))
-names(o1) <- c('Patient', 'Gene', 'Adjusted p-val', 'Oncogene', 'Lymphoma Gene', '% change (d0 vs final timepoint)', 'Max. abund. in final time point', 'Matrix')
-
-o2 <- dplyr::select(geneEnrichments.d0_vs_LastTimePoint.p2, pateint, gene, p2.adj, oncogene, lymphomaGene, p2.change, maxLateAbund2, mat2) %>%
-      dplyr::arrange(pateint, p2.adj) %>%
-      dplyr::mutate(p2.adj = formatC(p2.adj, format = "e", digits = 2))
-names(o2) <- c('Patient', 'Gene', 'Adjusted p-val', 'Oncogene', 'Lymphoma Gene', '% change (d0 vs final timepoint)', 'Max. abund. in final time point', 'Matrix')
-
-addDataFrame(o1, sheet1)
-addDataFrame(o2, sheet2)
-saveWorkbook(wb, file = 'reports/d0vsLastTimePoint.xlsx') 
-rm(o1, o2, wb, sheet1, sheet2, intSites.stdChrom, genes)
-
-
-
-
-
-
-# Test patients for enrichment of intSites in transcription units over time in PBMC.
-PBMC_inTU_tests <- bind_rows(lapply(c('Patient 2',  'Patient 4', 'Patient 6',  'Patient 7'), function(x){
-  M1 <- subset(intSites, patient == x & cellType == 'PBMC' & timePoint == 'M1')
-  Y1 <- subset(intSites, patient == x & cellType == 'PBMC' & timePoint == 'Y1')
-
-  m <- matrix(c(n_distinct(subset(M1, M1$nearestFeatureDist != 0)$posid), n_distinct(subset(M1, M1$nearestFeatureDist == 0)$posid),
-                n_distinct(subset(Y1, Y1$nearestFeatureDist != 0)$posid), n_distinct(subset(Y1, Y1$nearestFeatureDist == 0)$posid)),
-              nrow = 2, byrow = TRUE) 
-  
-  tibble(Patient = x, 
-         M1_percent_inTU = sprintf("%.1f%%", (m[1,2] / sum(m[1,]))*100), 
-         Y1_percent_inTU = sprintf("%.1f%%", (m[2,2] / sum(m[2,]))*100), 
-         Fishers_pVal = formatC(fisher.test(m)$p.val, format = "e", digits = 2))
-}))
-
-
-# Test patients for enrichment of intSites in transcription units over time in Neutrophils cells.
-Neutrophils_inTU_tests <- bind_rows(lapply(c('Patient 2',  'Patient 4', 'Patient 6',  'Patient 7'), function(x){
-  M3 <- subset(intSites, patient == x & cellType == 'Neutrophils' & timePoint == 'M3')
-  Y1 <- subset(intSites, patient == x & cellType == 'Neutrophils' & timePoint == 'Y1')
-  
-  m <- matrix(c(n_distinct(subset(M3, M3$nearestFeatureDist != 0)$posid), n_distinct(subset(M3, M3$nearestFeatureDist == 0)$posid),
-                n_distinct(subset(Y1, Y1$nearestFeatureDist != 0)$posid), n_distinct(subset(Y1, Y1$nearestFeatureDist == 0)$posid)),
-              nrow = 2, byrow = TRUE) 
-  
-  tibble(Patient = x, 
-         M3_percent_inTU = sprintf("%.1f%%", (m[1,2] / sum(m[1,]))*100), 
-         Y1_percent_inTU = sprintf("%.1f%%", (m[2,2] / sum(m[2,]))*100), 
-         Fishers_pVal = formatC(fisher.test(m)$p.val, format = "e", digits = 2))
-}))
-
+save(list = ls(all.names = TRUE), file = 'data/data.RData', envir = .GlobalEnv, compress = TRUE, compression_level = 9)
 
 
 
 # Create summary table.
+#--------------------------------------------------------------------------------------------------
+
+calculateUC50 <- function(abund){
+  stopifnot(is.vector(abund) & is.numeric(abund))
+  abund <- abund[order(abund)]
+  accum <- sapply(1:length(abund), function(i){sum(abund[1:i])})
+  length(accum[accum >= sum(abund)/2])
+}
+
+ppNum <- function(n){ if(is.na(n)) return(''); format(n,big.mark=",", scientific=FALSE, trim=TRUE) }
+
+
 summaryTable <- 
   group_by(intSites, GTSP) %>%
   summarise(timePointDays = timePointDays[1],
@@ -276,18 +116,24 @@ intSites <- intSites[-which(intSites$GTSP == 'GTSP1809'),]
 
 
 # Flip to read relAbunds for older data.
-intSites <- bind_rows(lapply(split(intSites, paste(intSites$patient, intSites$cellType, intSites$timePoint)), function(x){
-  x$relAbundFrags <- x$relAbund
-  if(x$patient[1] %in% c('Patient 3', 'Patient 5', 'Patient 9')){
-    x$relAbund <- (x$reads / sum(x$reads))*100
-  }
-  
-  x
+# intSites <- bind_rows(lapply(split(intSites, paste(intSites$patient, intSites$cellType, intSites$timePoint)), function(x){
+#  x$relAbundFrags <- x$relAbund
+#  if(x$patient[1] %in% c('Patient 3', 'Patient 5', 'Patient 9')){
+#    x$relAbund <- (x$reads / sum(x$reads))*100
+#  }
+# 
+#  x
+# }))
+
+
+bind_rows(lapply(unique(intSites$cellType), function(x){
+  tibble(cellType = x, maxRelAbund = sprintf("%.2f%%", max(subset(intSites, cellType == x & cellsPerSample >= 100)$relAbund)))
 }))
 
 
 
 # Create bad actor plot.  
+#--------------------------------------------------------------------------------------------------
 badActorPlot <- 
      dplyr::filter(intSites, ! timePoint %in% c('M1.5')) %>%
      dplyr::group_by(GTSP) %>%
@@ -297,7 +143,7 @@ badActorPlot <-
                    abs(nearestFeatureDist) <= 50000,
                    nearestFeature %in% c('SETBP1', 'PRDM16', 'MECOM')) %>%
      dplyr::mutate(cellType = paste0('  ', cellType, '    ')) %>%
-     dplyr::select(patient, GTSP, cellType, timePoint, estAbund, relAbund, nearestFeature) %>%
+     dplyr::select(patient, GTSP, cellType, timePoint, estAbund, relAbund, nearestFeature, posid) %>%
      dplyr::group_by(GTSP, nearestFeature) %>%
        dplyr::top_n(1, wt = relAbund) %>%
        dplyr::slice(1) %>%
@@ -323,6 +169,10 @@ badActorPlot <-
           legend.title=element_blank()) + 
     guides(fill=guide_legend(ncol=6)) 
 
+ggsave(badActorPlot, file = 'figures/SuppFig5.pdf', useDingbats = FALSE, height = 10, units = 'in')
+ggsave(badActorPlot, file = 'figures/SuppFig5.svg', height = 10, units = 'in')
+
+
 
 # Create plot data object.
 plotData <-
@@ -338,6 +188,7 @@ plotData <-
   dplyr::filter(timePoint != 'M1.5') 
 
 
+# Fig3a
 obsIntSites <- 
   ggplot(plotData, aes(timePoint, log10(nSites), group = cellType, color = cellType)) +
   theme_bw() +
@@ -355,6 +206,35 @@ obsIntSites <-
         axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 5, l = 0)),
         panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
         axis.line = element_line(colour = "black"))
+
+
+ggsave(obsIntSites, file = 'figures/3a.pdf', useDingbats = FALSE, height = 10, units = 'in')
+ggsave(obsIntSites, file = 'figures/3a.svg', height = 10, units = 'in')
+
+
+
+obsIntSitesChao1 <- 
+  ggplot(plotData, aes(timePoint, log10(nSitesChao1), group = cellType, color = cellType)) +
+  theme_bw() +
+  geom_point(size = 3) + 
+  #scale_color_manual(name = 'Cell type', values = rev(brewer.pal(10, "Paired"))) +
+  scale_color_manual(name = 'Cell type', values = c('#A5CDE1','#1F78B3','#9958A2','#F48332','#B3D789','#349F48','#F59898','#E11F26','#FCBE6E')) +
+  geom_line() +
+  facet_grid(patient~.) + 
+  annotate('text', x = 10.7, y = 0.8, label = levels(plotData$patient), size = 4) +
+  theme(strip.background = element_blank(), strip.text = element_blank(), legend.position="bottom") +
+  labs(x = 'Time point', y = 'Chao1 estimate of integrated cells (log10)') +
+  guides(color=guide_legend(ncol=4)) +
+  ylim(c(0,8)) +
+  theme(text = element_text(size=18),
+        axis.title.y = element_text(margin = margin(t = 0, r = 20, b = 0, l = 0)),
+        axis.title.x = element_text(margin = margin(t = 5, r = 0, b = 5, l = 0)),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+ggsave(obsIntSitesChao1, file = 'figures/3a_Chao1.pdf', useDingbats = FALSE, height = 10,  width = 5, units = 'in')
+ggsave(obsIntSitesChao1, file = 'figures/3a_Chao1.svg', height = 10, units = 'in')
+
 
 
 obsIntSites2 <- 
@@ -441,6 +321,10 @@ d <- dplyr::filter(intSites,
   dplyr::filter(posid %in% unique(posid)[1:clonesToTrack]) %>%
   dplyr::ungroup()
 
+max(d$relAbund)
+
+d$labeledNearestFeature <- sub("BSCL2,HNRNPUL2-BSCL2 *", 'BSCL2 *', d$labeledNearestFeature)
+
 timePoints <- gtools::mixedsort(unique(unlist(d$timePoints)))
 
 Neutrophils_maps <- lapply(split(d, d$patient), function(x){
@@ -452,11 +336,12 @@ Neutrophils_maps <- lapply(split(d, d$patient), function(x){
   ggplot(x, aes(timePoint, labeledNearestFeature, fill = relAbund/100)) +
     theme_bw() +
     scale_x_discrete(drop = FALSE) +
-    geom_tile() +
+    geom_tile(color = 'white') +
     labs(x = 'Time post treatment', y = 'Nearest gene') +
     scale_fill_gradient(name = 'Relative abundance',
                         low = "#cce5ff", high = "#000fdb", 
-                        limits = c(0, 0.27), breaks = c(0.01, 0.15, 0.25), label = scales::percent_format(accuracy = 0.01))+ 
+                        # limits = c(0, 0.20), breaks = c(0.05, 0.10, 0.15, 0.20), label = scales::percent_format(accuracy = 0.01)) + 
+                        limits = c(0, 0.025), breaks = c(0.01, 0.02, 0.025), label = scales::percent_format(accuracy = 0.1)) +
     labs(x = '', y = '') +
     theme(panel.border = element_blank(), 
           text = element_text(size=14),
@@ -489,7 +374,12 @@ gD$widths[2:5] <- as.list(maxWidth)
 gE$widths[2:5] <- as.list(maxWidth)
 gF$widths[2:5] <- as.list(maxWidth)
 gG$widths[2:5] <- as.list(maxWidth)
-grid.arrange(gA, gB, gC, gD, gE, gF, gG, legend, ncol=1)
+
+
+ggsave(grid.arrange(gA, gB, gC, gD, gE, gF, gG, legend, ncol=1), file = 'figures/3b.pdf', useDingbats = FALSE, height = 20, units = 'in')
+ggsave(grid.arrange(gA, gB, gC, gD, gE, gF, gG, legend, ncol=1), file = 'figures/3b.svg', height = 20, units = 'in')
+
+
 
 
 TopRelAbund_Neutrophils <- 
@@ -521,13 +411,11 @@ TopRelAbund_Neutrophils <-
         panel.grid.minor = element_blank(), 
         axis.line = element_line(colour = "black"))
 
-
-save(list = ls(all.names = TRUE), file = 'report.RData', 
+save(list = ls(all.names = TRUE), file = 'data/report.RData', 
      envir = .GlobalEnv, compress = TRUE, compression_level = 9)
 
 
 stop()
-
 
 # Dev code below
 #--------------------------------------------------------------------------------------------------
@@ -539,6 +427,138 @@ stop()
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Gene enrichment between d0 and final patient time points.
+#--------------------------------------------------------------------------------------------------
+
+CPUs <- 30
+
+intSites.stdChrom <- subset(intSites, seqnames %in% paste0('chr', c(1:23, 'X', 'Y')))
+intSites.stdChrom <- mutate(intSites.stdChrom, nearestFeature = strsplit(intSites.stdChrom$nearestFeature, ','))
+intSites.stdChrom <- unnest(intSites.stdChrom, nearestFeature)
+
+genes <- tibble(gene = unique(intSites.stdChrom$nearestFeature))
+genes$n <- ntile(1:nrow(genes), CPUs)
+
+cluster <- makeCluster(CPUs)
+
+nearestFeatureBoundaries <-
+  bind_rows(parLapply(cluster, split(genes, genes$n), function(x){
+    library(dplyr)
+    library(GenomicRanges)
+    bind_rows(lapply(x$gene, function(x2){
+      o <- subset(gt23::hg38.refSeqGenesGRanges, toupper(name2) == toupper(x2))
+      o <- o[! grepl('_', seqnames(o))]
+      tibble(gene = x2, chr = as.character(seqnames(o))[1], start = min(start(o)), end = max(end(o)))
+    }))
+  }))
+
+stopCluster(cluster)
+
+
+patient_early_late_sites <- lapply(c('Patient 2',  'Patient 4', 'Patient 6',  'Patient 7'), function(x){
+  o <- subset(intSites.stdChrom, patient == x)
+  a <- subset(o, timePoint == 'D0')
+  b <- subset(o, timePointDays == max(o$timePointDays) & cellType == 'PBMC')
+  list(a, b)
+})
+names(patient_early_late_sites) <- c('Patient 2',  'Patient 4', 'Patient 6',  'Patient 7')
+
+
+geneEnrichments.d0_vs_LastTimePoint  <-
+  bind_rows(lapply(patient_early_late_sites, function(x){
+    
+    patientNearestFeatureBoundaries   <- subset(nearestFeatureBoundaries, gene %in% c(x[[1]]$nearestFeature, x[[2]]$nearestFeature))
+    patientNearestFeatureBoundaries$n <- ntile(1:nrow(patientNearestFeatureBoundaries), CPUs)
+    
+    cluster <- makeCluster(CPUs)
+    clusterExport(cluster, varlist = c('intSites.stdChrom', 'patientNearestFeatureBoundaries'), envir = environment())
+    
+    r <- bind_rows(parLapply(cluster, split(patientNearestFeatureBoundaries, patientNearestFeatureBoundaries$n), function(x2){
+      library(dplyr)
+      
+      bind_rows(lapply(x2$gene, function(x3){
+        g <- subset(patientNearestFeatureBoundaries, gene == x3)
+        
+        # Find patient sites within this gene.
+        i1 <- subset(intSites.stdChrom, patient = x[[1]]$patient[1], seqnames == g$chr & start >= g$start & start <= g$end)
+        i1.maxLateAbund <- max(subset(x[[2]], posid %in% i1$posid)$estAbund)
+        
+        m1 <- matrix(c(n_distinct(subset(x[[1]], posid %in% i1$posid)$posid),   n_distinct(subset(x[[2]], posid %in% i1$posid)$posid),
+                       n_distinct(subset(x[[1]], ! posid %in% i1$posid)$posid), n_distinct(subset(x[[2]], ! posid %in% i1$posid)$posid)),
+                     nrow = 2, byrow = TRUE, dimnames = list(c('In', 'Out'), c('Early', 'Late')))
+        
+        # Expand gene boundaries by 50K.
+        i2 <- subset(intSites.stdChrom, patient = x[[1]]$patient[1], seqnames == g$chr & start >= (g$start - 50000) & start <= (g$end + 50000))
+        i2.maxLateAbund <- max(subset(x[[2]], posid %in% i2$posid)$estAbund)
+        
+        m2 <- matrix(c(n_distinct(subset(x[[1]], posid %in% i2$posid)$posid), n_distinct(subset(x[[2]], posid %in% i2$posid)$posid),
+                       n_distinct(subset(x[[1]], ! posid %in% i2$posid)$posid), n_distinct(subset(x[[2]], ! posid %in% i2$posid)$posid)),
+                     nrow = 2, byrow = TRUE, dimnames = list(c('In', 'Out'), c('Early', 'Late')))
+        
+        matrix2string <- function(m) paste0('Early: ', m[1,1], ' in / ', m[2,1], ' out | Late: ', m[1,2], ' in / ', m[2,2], ' out')
+        pChange <- function(m) ((m[1,2] / sum(m[,2])) - (m[1,1] / sum(m[,1])))*100
+        
+        tibble(pateint = x[[1]]$patient[1], gene = x3, mat1 = matrix2string(m1), p1 = fisher.test(m1)$p.val,
+               p1.change = sprintf("%.2f%%", pChange(m1)), mat2 = matrix2string(m2), p2 = fisher.test(m2)$p.val,
+               p2.change = sprintf("%.2f%%", pChange(m2)), maxLateAbund1 = i1.maxLateAbund, maxLateAbund2 = i2.maxLateAbund)
+      }))
+    }))
+    
+    stopCluster(cluster)
+    gc()
+    r
+  }))
+
+geneEnrichments.d0_vs_LastTimePoint$p1.adj <- p.adjust(geneEnrichments.d0_vs_LastTimePoint$p1)
+geneEnrichments.d0_vs_LastTimePoint$p2.adj <- p.adjust(geneEnrichments.d0_vs_LastTimePoint$p2)
+geneEnrichments.d0_vs_LastTimePoint$oncogene <- toupper(geneEnrichments.d0_vs_LastTimePoint$gene) %in% toupper(gt23::hg38.oncoGeneList)
+geneEnrichments.d0_vs_LastTimePoint$lymphomaGene <- toupper(geneEnrichments.d0_vs_LastTimePoint$gene) %in% toupper(gt23::hg38.lymphomaGenesList)
+
+geneEnrichments.d0_vs_LastTimePoint.p1 <- subset(geneEnrichments.d0_vs_LastTimePoint, p1.adj <= 0.05)
+geneEnrichments.d0_vs_LastTimePoint.p2 <- subset(geneEnrichments.d0_vs_LastTimePoint, p2.adj <= 0.05)
+
+wb <- createWorkbook()
+sheet1 <- createSheet(wb, sheetName = 'in TU')
+sheet2 <- createSheet(wb, sheetName = 'in TU +- 50KB')
+
+o1 <- dplyr::select(geneEnrichments.d0_vs_LastTimePoint.p1, pateint, gene, p1.adj, oncogene, lymphomaGene, p1.change, maxLateAbund1, mat1) %>%
+  dplyr::arrange(pateint, p1.adj) %>%
+  dplyr::mutate(p1.adj = formatC(p1.adj, format = "e", digits = 2))
+names(o1) <- c('Patient', 'Gene', 'Adjusted p-val', 'Oncogene', 'Lymphoma Gene', '% change (d0 vs final timepoint)', 'Max. abund. in final time point', 'Matrix')
+
+o2 <- dplyr::select(geneEnrichments.d0_vs_LastTimePoint.p2, pateint, gene, p2.adj, oncogene, lymphomaGene, p2.change, maxLateAbund2, mat2) %>%
+  dplyr::arrange(pateint, p2.adj) %>%
+  dplyr::mutate(p2.adj = formatC(p2.adj, format = "e", digits = 2))
+names(o2) <- c('Patient', 'Gene', 'Adjusted p-val', 'Oncogene', 'Lymphoma Gene', '% change (d0 vs final timepoint)', 'Max. abund. in final time point', 'Matrix')
+
+addDataFrame(o1, sheet1)
+addDataFrame(o2, sheet2)
+saveWorkbook(wb, file = 'reports/d0vsLastTimePoint.xlsx')
+rm(o1, o2, wb, sheet1, sheet2, intSites.stdChrom, genes)
 
 
 
@@ -651,6 +671,8 @@ topClonalRelativeAbunds <- lapply(split(d, d$patient), function(x){
         axis.line = element_line(colour = "black"))
 })
   
+
+
 
 # Relabund plots
 #--------------------------------------------------------------------------------------------------

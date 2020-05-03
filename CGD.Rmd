@@ -14,7 +14,7 @@ header-includes:
 output:
   pdf_document:
     toc: false
-    keep_tex: no
+    keep_tex: yes
     latex_engine: xelatex
 ---
 ```{r echo = FALSE, message=FALSE, warning=FALSE}
@@ -24,10 +24,19 @@ library(png)
 library(grid)
 library(ggplot2)
 library(dplyr)
+library(vegan)
 library(RColorBrewer)
 library(gridExtra)
-load('report.RData')
+load('data/report.RData')
 ppNum <- function (n) format(n, big.mark = ",", scientific = FALSE, trim = TRUE)
+Y1.PBMC <- dplyr::filter(intSites, timePoint == 'Y1' & cellType == 'PBMC')
+
+Y1.PBMC.counts <- subset(intSites,  timePoint == 'Y1' & cellType == 'PBMC') %>% 
+  group_by(patient) %>% 
+  summarise(sites = n_distinct(posid),
+            chaoCells = round(estimateR(estAbund, index='chao')[2], 0)) %>%
+  ungroup()
+
 ```
 
 **Project interface**  
@@ -35,7 +44,15 @@ ppNum <- function (n) format(n, big.mark = ",", scientific = FALSE, trim = TRUE)
 Individual patient reports and a detailed account of received sample can be found via this 
 ([Link](http://bushmanlab.org/data/export/projects/gtVISA/CGD)).
 
-\vspace{1.0cm}
+\vspace{0.5cm}
+**Basic stats**  
+Average number of integrations per subject in PBMC at Y1: `r round(mean(Y1.PBMC.counts$sites))`  
+Average number of sampled cells (Chao1 estimate) per subject in PBMC at Y1: `r ppNum(round(mean(Y1.PBMC.counts$chaoCells)))`  
+Max. rel. abund. of clones in PBMC at Y1: `r sprintf("%.2f%%", max(Y1.PBMC$relAbund))`  
+Max. rel. abund. of clones near SETBP1, PRDM16 and MECOM in PBMC at Y1: `r sprintf("%.2f%%", max(subset(Y1.PBMC, nearestFeature %in% c('SETBP1', 'PRDM16', 'MECOM'))$relAbund))`    
+Max. rel. abund. of clones in PBMC (all time points): `r sprintf("%.2f%%", max(subset(intSites, cellType == 'PBMC')$relAbund))`  
+
+\vspace{0.5cm}
 
 **Observed integrations**  
 Bar graph format  
@@ -43,7 +60,7 @@ Bar graph format
 \vspace{1.0cm}
 
 
-```{r, echo = FALSE, message = FALSE, fig.width=8, fig.height=6.5}
+```{r, echo = FALSE, message = FALSE, fig.width=8, fig.height=5.5}
 obsIntSites2
 ```
 
@@ -97,7 +114,7 @@ grid.arrange(gE, gF, gG, legend, ncol=1)
 \vspace{0.5cm}
 
 ```{r, echo = FALSE}
-kable(summaryTable, "latex", longtable = T, booktabs = T, linesep = '', align = 'lllclllllll') %>% kable_styling(font_size = 7, latex_options = c("repeat_header"))
+kable(summaryTable, "latex", longtable = T, booktabs = T, linesep = '', align = 'lllclllllll') %>% kable_styling(font_size = 9, latex_options = c("repeat_header"))
 ```
 
 
